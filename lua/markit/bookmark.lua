@@ -487,26 +487,32 @@ function Bookmarks:get_list(opts)
     opts = opts or {}
     local items = {}
 
-    local files = get_bookmark_files(self, opts.project_only)
     local buffer_filter = opts.buffer
     local project_filter = opts.project and require('markit.utils').get_git_root() or nil
 
-    for _, file in ipairs(files) do
-        local data = read_bookmark_file(file)
-        if data then
-            if opts.group then
-                if data[tostring(opts.group)] then
-                    local group_data = data[tostring(opts.group)]
-                    items = vim.list_extend(
-                        items,
-                        process_group_marks(group_data, opts.group, buffer_filter, project_filter)
-                    )
-                end
-            else
-                for group_key, group_data in pairs(data) do
-                    local group_nr = tonumber(group_key)
-                    items =
-                        vim.list_extend(items, process_group_marks(group_data, group_nr, buffer_filter, project_filter))
+    for group_nr, group in pairs(self.groups) do
+        if not opts.group or opts.group == group_nr then
+            for bufnr, buffer_marks in pairs(group.marks) do
+                if utils.is_valid_buffer(bufnr) then
+                    local filepath = vim.api.nvim_buf_get_name(bufnr)
+                    if filepath and filepath ~= '' then
+                        if
+                            (not buffer_filter or bufnr == buffer_filter)
+                            and (not project_filter or filepath:sub(1, #project_filter) == project_filter)
+                        then
+                            for _, mark in pairs(buffer_marks) do
+                                local text = utils.safe_get_line(bufnr, mark.line - 1)
+                                table.insert(items, {
+                                    bufnr = bufnr,
+                                    lnum = mark.line,
+                                    col = mark.col + 1,
+                                    group = group_nr,
+                                    line = vim.trim(text),
+                                    path = filepath,
+                                })
+                            end
+                        end
+                    end
                 end
             end
         end
