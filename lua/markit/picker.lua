@@ -300,7 +300,8 @@ local function handle_selection(prompt_bufnr, selection)
 
     local entry = selection.value
     if entry.path and entry.path ~= '' then
-        vim.cmd('edit ' .. vim.fn.fnameescape(entry.path))
+        local path = vim.fn.fnamemodify(entry.path, ':.')
+        vim.cmd('edit ' .. vim.fn.fnameescape(path))
     end
 
     if entry.lnum then
