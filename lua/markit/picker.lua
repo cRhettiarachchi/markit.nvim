@@ -393,16 +393,17 @@ function M.marks_list_project(mark_state)
 end
 
 function M.bookmarks_list_all(bookmark_state)
+    bookmark_state:refresh()
     local results = bookmark_state:get_list({})
     if not results or #results == 0 then
-        vim.notify('No bookmarks found', vim.log.levels.INFO)
+        vim.notify('No bookmarks found in project', vim.log.levels.INFO)
         return
     end
 
     vim.schedule(function()
         pickme.custom_picker({
             items = results,
-            title = 'All Bookmarks',
+            title = 'Project Bookmarks',
             entry_maker = bookmarks_entry_maker,
             preview_generator = generate_preview,
             preview_ft = 'markdown',
@@ -433,12 +434,8 @@ function M.bookmarks_list_buffer(bookmark_state)
 end
 
 function M.bookmarks_list_project(bookmark_state)
-    local git_root = require('markit.utils').get_git_root()
-    if not git_root then
-        vim.notify('Not in a git repository', vim.log.levels.WARN)
-        return
-    end
-    local results = bookmark_state:get_project_list(git_root)
+    bookmark_state:refresh()
+    local results = bookmark_state:get_list({})
 
     if not results or #results == 0 then
         vim.notify('No bookmarks found in project', vim.log.levels.INFO)
