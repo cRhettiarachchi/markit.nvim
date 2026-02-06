@@ -81,6 +81,7 @@ end
 
 function Bookmarks:serialize()
     local data = {}
+    local root = self:get_root_dir()
     for group_nr, group in pairs(self.groups) do
         local group_key = tostring(group_nr)
         data[group_key] = {
@@ -91,9 +92,15 @@ function Bookmarks:serialize()
         for bufnr, buffer_marks in pairs(group.marks) do
             local filename = vim.api.nvim_buf_get_name(bufnr)
             if filename and filename ~= '' then
-                data[group_key].marks[filename] = {}
+                -- Store as project-relative path
+                local rel_path = filename
+                local root_prefix = root .. '/'
+                if root and filename:sub(1, #root_prefix) == root_prefix then
+                    rel_path = filename:sub(#root_prefix + 1)
+                end
+                data[group_key].marks[rel_path] = {}
                 for _, mark in pairs(buffer_marks) do
-                    table.insert(data[group_key].marks[filename], {
+                    table.insert(data[group_key].marks[rel_path], {
                         line = mark.line,
                         col = mark.col,
                     })
@@ -109,24 +116,34 @@ function Bookmarks:deserialize(data)
         return
     end
 
+    local root = self:get_root_dir()
+
     for group_key, group_data in pairs(data) do
         local group_nr = tonumber(group_key)
         if not self.groups[group_nr] then
             self:init(group_nr)
         end
 
-        for filename, marks in pairs(group_data.marks) do
-            local success, bufnr = pcall(vim.fn.bufadd, filename)
-            if success and bufnr and bufnr > 0 then
-                pcall(vim.fn.bufload, bufnr)
+        for filepath, marks in pairs(group_data.marks) do
+            -- Resolve relative paths to absolute using project root
+            local abs_path = filepath
+            if not filepath:match('^/') then
+                abs_path = root .. '/' .. filepath
+            end
 
-                if utils.is_valid_buffer(bufnr) then
-                    for _, mark in ipairs(marks) do
-                        if type(mark.line) == 'number' and mark.line > 0 then
-                            local col = type(mark.col) == 'number' and mark.col or 0
-                            pcall(function()
-                                self:place_mark(group_nr, bufnr, { mark.line, col })
-                            end)
+            if vim.fn.filereadable(abs_path) == 1 then
+                local success, bufnr = pcall(vim.fn.bufadd, abs_path)
+                if success and bufnr and bufnr > 0 then
+                    pcall(vim.fn.bufload, bufnr)
+
+                    if utils.is_valid_buffer(bufnr) then
+                        for _, mark in ipairs(marks) do
+                            if type(mark.line) == 'number' and mark.line > 0 then
+                                local col = type(mark.col) == 'number' and mark.col or 0
+                                pcall(function()
+                                    self:place_mark(group_nr, bufnr, { mark.line, col })
+                                end)
+                            end
                         end
                     end
                 end
@@ -431,64 +448,11 @@ function Bookmarks:refresh()
     end
 end
 
----Helper function to get all bookmark files
-local function get_bookmark_files(self, project_only)
-    local bookmarks_dir = self:get_bookmarks_dir()
-    if project_only then
-        local bookmark_file = self:get_bookmark_file()
-        return { bookmark_file.filename }
-    end
-    return vim.fn.glob(bookmarks_dir.filename .. '/*.json', true, true)
-end
-
-local function read_bookmark_file(file)
-    local f = io.open(file, 'r')
-    if not f then
-        return nil
-    end
-
-    local content = f:read('*all')
-    f:close()
-
-    local ok, data = pcall(vim.json.decode, content)
-    return ok and data or nil
-end
-
----Helper function to process marks from a group
-local function process_group_marks(group_data, group_nr, buffer_filter, project_filter)
-    local items = {}
-    for filepath, marks in pairs(group_data.marks) do
-        if vim.fn.filereadable(filepath) == 1 then
-            local bufnr = vim.fn.bufadd(filepath)
-            vim.fn.bufload(bufnr)
-
-            if
-                (not buffer_filter or bufnr == buffer_filter)
-                and (not project_filter or (filepath:sub(1, #project_filter) == project_filter))
-            then
-                for _, mark in ipairs(marks) do
-                    local text = vim.api.nvim_buf_get_lines(bufnr, mark.line - 1, mark.line, false)[1] or ''
-                    table.insert(items, {
-                        bufnr = bufnr,
-                        lnum = mark.line,
-                        col = mark.col + 1,
-                        group = group_nr,
-                        line = vim.trim(text),
-                        path = filepath,
-                    })
-                end
-            end
-        end
-    end
-    return items
-end
-
 function Bookmarks:get_list(opts)
     opts = opts or {}
     local items = {}
 
     local buffer_filter = opts.buffer
-    local project_filter = opts.project and require('markit.utils').get_git_root() or nil
 
     for group_nr, group in pairs(self.groups) do
         if not opts.group or opts.group == group_nr then
@@ -496,10 +460,7 @@ function Bookmarks:get_list(opts)
                 if utils.is_valid_buffer(bufnr) then
                     local filepath = vim.api.nvim_buf_get_name(bufnr)
                     if filepath and filepath ~= '' then
-                        if
-                            (not buffer_filter or bufnr == buffer_filter)
-                            and (not project_filter or filepath:sub(1, #project_filter) == project_filter)
-                        then
+                        if not buffer_filter or bufnr == buffer_filter then
                             for _, mark in pairs(buffer_marks) do
                                 local text = utils.safe_get_line(bufnr, mark.line - 1)
                                 table.insert(items, {
@@ -528,7 +489,7 @@ end
 
 function Bookmarks:get_project_list(cwd)
     self:refresh()
-    return self:get_list({ project = true })
+    return self:get_list({})
 end
 
 function Bookmarks:to_list(list_type, group_nr)
@@ -587,27 +548,18 @@ function Bookmarks:project_to_list(list_type)
     list_type = list_type or 'loclist'
     local list_fn = utils.choose_list(list_type)
     local items = {}
-    local git_root = utils.get_git_root()
-
-    if not git_root then
-        vim.notify('Not in a git repository', vim.log.levels.WARN)
-        return
-    end
 
     for group_nr, group in pairs(self.groups) do
         for bufnr, buffer_marks in pairs(group.marks) do
             if utils.is_valid_buffer(bufnr) then
-                local filepath = vim.api.nvim_buf_get_name(bufnr)
-                if filepath:sub(1, #git_root) == git_root then
-                    for mark_key, mark in pairs(buffer_marks) do
-                        local text = utils.safe_get_line(bufnr, mark.line - 1)
-                        table.insert(items, {
-                            bufnr = bufnr,
-                            lnum = mark.line,
-                            col = mark.col + 1,
-                            text = 'bookmark ' .. group_nr .. ': ' .. text,
-                        })
-                    end
+                for mark_key, mark in pairs(buffer_marks) do
+                    local text = utils.safe_get_line(bufnr, mark.line - 1)
+                    table.insert(items, {
+                        bufnr = bufnr,
+                        lnum = mark.line,
+                        col = mark.col + 1,
+                        text = 'bookmark ' .. group_nr .. ': ' .. text,
+                    })
                 end
             else
                 group.marks[bufnr] = nil
